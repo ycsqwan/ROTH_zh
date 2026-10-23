@@ -7,8 +7,7 @@
 #   make install          copy plugin.dll + font + translation table into DIST_WIN
 #   make install GAME=1   ... and then into the GOG install's mods/chinese
 #
-# Toolchain: any 32-bit mingw-w64 gcc. The w64devkit build used here lives in
-# F:\mingw\w64devkit (put its bin/ on PATH first).
+# Toolchain: any 32-bit mingw-w64 gcc, e.g. w64devkit (put its bin/ on PATH).
 #
 # The SDK include path is the ABI source of truth (struct roth_plugin_info_v1,
 # struct roth_chain, the generated override typedefs in roth_sdk_overrides.h).
@@ -28,8 +27,10 @@ else
   CC     ?= cc
 endif
 
-DIST_WIN ?= ../../repos/ROTH.C/roth_c/dist-win/mods/chinese
-GOG_MODS ?= /d/goggame/Realms of the Haunting/ROTH/mods/chinese
+DIST_WIN ?= dist/mods/chinese
+# Optional extra target for the local game install. Unset by default; point it
+# at <game-dir>/ROTH/mods/chinese and build with `make install GAME=1`.
+GOG_MODS ?=
 
 # FONT_SRC is the one TrueType face the plugin actually loads (see FONT_FILE in
 # plugin.c). The other faces in fonts/ are kept only for experiments and are NOT
