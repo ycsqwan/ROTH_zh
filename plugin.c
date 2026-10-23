@@ -22,12 +22,11 @@
  * palette indices". The original marks empty neighbours with literal index 1
  * (the outline) and blits ramp colours on top. We keep that convention.
  *
- * Game-RAM access: the engine hands us raw host pointers (canonical VA + base),
- * so a plugin-side string read goes through the SDK's bounds-checked accessor
- * rb(): it maps host pointer -> canonical offset (ptr - to_ptr(0)) and reads via
- * api->game_ram->u8(). A flat dereference of an out-of-range address does not
- * just return garbage -- plugin_loader.c documents that a plugin read outside
- * the mapped window faults process-wide.
+ * Game-RAM access: rb() reads a string byte. Pointers inside the game_ram
+ * window go through the SDK's bounds-checked accessor (api->game_ram->u8);
+ * pointers outside it -- the exe's own string/data pages, which the engine also
+ * passes us -- are dereferenced flat, exactly as the engine's own RB() does.
+ * See the "Game-RAM access" block below for why the two paths are both needed.
  *
  * Build (see Makefile):
  *   i686-w64-mingw32-gcc -shared -std=c11 -O2 -Wall -Wextra \
@@ -44,7 +43,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
 
 /* ==========================================================================
  * Tunables
@@ -127,10 +125,74 @@ static void logf_(const char *fmt, ...)
     fclose(f);
 }
 
+/* ---- queued logging ------------------------------------------------------
+ * The override can run in the 70 Hz tick (TICK_ISR, where file I/O per line is
+ * not acceptable), so it logs through logq(): format into a RAM buffer and let
+ * on_frame_game drain it. logf_() stays for the contexts where fopen is fine.
+ * ---------------------------------------------------------------------- */
+#define LOGQ_MAX 8192
+static char  g_logq[LOGQ_MAX];
+static size_t g_logq_n;
+
+static void logq(const char *fmt, ...)
+{
+    if (g_logq_n >= LOGQ_MAX) return;      /* drop rather than overflow */
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(g_logq + g_logq_n, LOGQ_MAX - g_logq_n, fmt, ap);
+    va_end(ap);
+    if (n < 0) return;
+    if ((size_t)n >= LOGQ_MAX - g_logq_n) { g_logq_n = LOGQ_MAX - 1; return; }
+    g_logq_n += (size_t)n;
+}
+
+static void logq_flush(void)
+{
+    if (!g_logq_n) return;
+    FILE *f = fopen(g_log_path, "ab");
+    if (!f) { g_logq_n = 0; return; }
+    fwrite(g_logq, 1, g_logq_n, f);
+    fclose(f);
+    g_logq_n = 0;
+}
+
 /* ==========================================================================
- * Flat-address accessors (identity: the engine's RB/WB model)
+ * Game-RAM access
+ *
+ * The engine hands draw_text_to_buffer() TWO kinds of string pointer, and they
+ * need different handling:
+ *
+ *   1. A canonical VA + base (host address inside the game_ram window). Only
+ *      the SDK accessor may touch these: plugin_loader.c documents that the
+ *      sub-ranges of [0,size) which carry no named globals are "unmapped
+ *      image-free (a plugin read there faults -- fail-process-wide, §10.6)".
+ *      The accessor is bounds-checked (gr_u8 returns 0 out of range), so a
+ *      bogus pointer reads as an empty string instead of killing the process.
+ *
+ *   2. A plain host pointer into the mapped image (the exe's own string/data
+ *      pages, e.g. the menu text pool). These are OUTSIDE [base, base+size),
+ *      so the accessor cannot reach them -- clamping the offset to the window
+ *      would return 0 for every one of them and every menu line would fall
+ *      through to English. The engine's own RB() is a flat dereference and the
+ *      baseline mod relied on exactly that, which is why the baseline translated
+ *      menus correctly.
+ *
+ * So: in-window -> SDK accessor; out-of-window -> flat dereference.
  * ========================================================================== */
-static uint8_t RB(uint32_t a) { return *(volatile uint8_t *)(uintptr_t)a; }
+static uintptr_t g_base;      /* canonical VA 0 as a host address; 0 = unknown */
+static int       g_gr_ok;     /* base resolved -> rb() is usable               */
+static uint32_t  g_ram_size;  /* game RAM bytes; 0 = unknown (set in ram_ready) */
+
+static uint8_t rb(const struct roth_api_v1 *api, uint32_t hostptr)
+{
+    if (g_gr_ok && api->game_ram &&
+        hostptr >= g_base &&
+        (uint64_t)hostptr < (uint64_t)g_base + g_ram_size) {
+        return api->game_ram->u8((uint32_t)(hostptr - g_base));
+    }
+    /* Out of window: a mapped image pointer, exactly as the engine reads it. */
+    return *(volatile uint8_t *)(uintptr_t)hostptr;
+}
 
 /* ==========================================================================
  * Font face + glyph cache
@@ -140,7 +202,6 @@ static int            g_font_ok;
 static float          g_scale;
 static int            g_baseline;   /* px from line top down to the baseline */
 static int            g_line_h;     /* px between baselines for CJK text     */
-static uint32_t       g_ram_size;   /* game RAM bytes; 0 = unknown           */
 static int            g_asc_units;  /* ascent in font units (scale-independent) */
 static int            g_desc_units; /* descent in font units                   */
 static uint8_t       *g_font_blob;
@@ -449,16 +510,33 @@ typedef void (ROTH_CDECL *draw_text_fn)(uint32_t, uint32_t, uint32_t, uint32_t);
 
 static uint8_t      g_ramp[256][12];
 static uint8_t      g_ramp_ok[256];
-static draw_text_fn g_draw_orig;        /* recorded original body */
+static uint8_t      g_ramp_pend[256];   /* harvest requested, not done yet  */
+static draw_text_fn g_draw_orig;        /* recorded original body (entry+5)  */
 
-static void ramp_build(uint8_t colour)
+/* Called from the override. This runs in whatever context the original ran in
+ * -- sdk/MODDING_GUIDE.md: "no engine calls, be fast" -- so it must not render
+ * anything itself. It only makes sure g_ramp[colour] holds *something* usable
+ * and books the real harvest for on_frame_game. Until that lands the colour
+ * renders flat; the colours the game actually uses are pre-harvested on the
+ * first frame, so in practice this fallback is never visible. */
+static void ramp_prefetch(uint8_t colour)
 {
     if (g_ramp_ok[colour]) return;
+    g_ramp_pend[colour] = 1;
+    for (int i = 0; i < 12; i++) g_ramp[colour][i] = colour;
+}
 
+/* Called from on_frame_game, where engine calls are legal. Renders the probe
+ * string with the recorded original body and reads the palette indices back to
+ * learn the real 12-step shade ramp for this text colour. */
+static void ramp_harvest(uint8_t colour)
+{
     uint8_t ramp[12];
     for (int i = 0; i < 12; i++) ramp[i] = colour;   /* flat fallback */
 
     if (g_draw_orig && g_probe_n > 0) {
+        /* Single writer: only on_frame_game touches this, and it is not
+         * re-entered from itself. (The override's scratch lives on the stack.) */
         static uint8_t scratch[PROBE_PITCH * PROBE_ROWS];
         memset(scratch, 0, sizeof scratch);
         g_probe_str[1] = colour;
@@ -485,6 +563,7 @@ static void ramp_build(uint8_t colour)
     }
     memcpy(g_ramp[colour], ramp, sizeof ramp);
     g_ramp_ok[colour] = 1;
+    g_ramp_pend[colour] = 0;
 }
 
 /* ==========================================================================
@@ -766,12 +845,12 @@ static void render_utf8(uint8_t *base, uint32_t pitch2, uint32_t half,
  * ========================================================================== */
 static int g_ready;
 
-static uint8_t ramp_colour(uint32_t str)
+static uint8_t ramp_colour(const struct roth_api_v1 *api, uint32_t str)
 {
     for (int i = 0; i < 256; i++) {
-        uint8_t c = RB(str + (uint32_t)i);
+        uint8_t c = rb(api, str + (uint32_t)i);
         if (c == 0) break;
-        if (c == 0x01) return RB(str + (uint32_t)i + 1u);
+        if (c == 0x01) return rb(api, str + (uint32_t)i + 1u);
     }
     return 0x0d;
 }
@@ -786,23 +865,23 @@ static int       g_banner_ink;     /* ramp colour the banner is drawn in */
 static uint8_t  *g_banner_px;
 static uint32_t  g_selftest_frames;
 
-/* ---- compose cadence ----------------------------------------------------
- * g_selftest_frames and the old probe counter were clamped to 5 / 6, so the
- * log only ever showed the first handful of ticks and the cadence looked
- * ~0.3 Hz when it is really the SIGALRM rate (~70 Hz). on_compose_tick now
- * logs the true rate once every 70 ticks.
+/* ---- cadence -----------------------------------------------------------
+ * The old code paced its diagnostics with time(NULL) and a callback count.
+ * sdk/README.md is explicit: use the engine's own 70 Hz counter at 0x90bcc
+ * (game_ram->u16) rather than wall-clock or callback counts, so the pacing
+ * tracks the game rather than the host. on_compose_tick logs the true tick
+ * rate once every 70 ticks.
  * ---------------------------------------------------------------------- */
-static unsigned long g_tick_t0;
-static uint32_t      g_tick_n;
-static unsigned long g_frame_t0;
-static uint32_t      g_frame_n;
+static uint32_t g_tick_n;      /* ticks seen by on_compose_tick            */
+static uint16_t g_tick_t0;     /* engine 70 Hz counter at first tick        */
+static uint32_t g_frame_n;     /* ticks seen by on_frame_game               */
+static uint16_t g_frame_t0;    /* engine 70 Hz counter at first frame       */
 
 static void ROTH_CDECL on_draw_text_to_buffer(struct roth_chain *chain,
                                               const struct roth_api_v1 *api,
                                               uint32_t str, uint32_t dest,
                                               uint32_t pitch, uint32_t flags)
 {
-    (void)api;
     if (!g_ready || str == 0 || pitch == 0) {
         roth_next_draw_text_to_buffer(chain, str, dest, pitch, flags);
         return;
@@ -818,7 +897,7 @@ static void ROTH_CDECL on_draw_text_to_buffer(struct roth_chain *chain,
         int ascii_n = 0;
         char ascii[40];
         for (int i = 0; i < 64 && hn < sizeof hex - 4; i++) {
-            uint8_t c = RB(str + (uint32_t)i);
+            uint8_t c = rb(api, str + (uint32_t)i);
             if (c == 0) break;
             hn += (size_t)snprintf(hex + hn, sizeof hex - hn, "%02x ", c);
             if (c >= 0x20 && c < 0x7f && ascii_n < (int)sizeof ascii - 1)
@@ -826,37 +905,49 @@ static void ROTH_CDECL on_draw_text_to_buffer(struct roth_chain *chain,
         }
         hex[hn] = 0;
         ascii[ascii_n] = 0;
-        logf_("draw#%u: dest=%08x pitch=%u flags=%02x raw=%s ascii='%s'",
-              g_draw_calls, dest, pitch, flags, hex, ascii);
+        /* Diagnostic: dump the raw str pointer and whether it lands inside the
+         * game_ram window (the two paths rb() takes). */
+        int in_win = g_gr_ok && str >= g_base &&
+                     (uint64_t)str < (uint64_t)g_base + g_ram_size;
+        logq("draw#%u: str=%08x dest=%08x win=%d base=%08x ok=%d pitch=%u flags=%02x raw=%s ascii='%s'",
+             g_draw_calls, str, dest, in_win, (uint32_t)g_base,
+             g_gr_ok, pitch, flags, hex, ascii);
     }
-    /* chain->base is the recorded original body (winner entry + 5). Calling it
-     * directly keeps us independent of chain position / downstream plugins. */
+    /* chain->base is the recorded original body (winner entry + 5). We keep it
+     * for two jobs that genuinely need vanilla output: the shade-ramp harvest
+     * (done later, in on_frame_game) and re-emitting an untranslated line's
+     * indent. It is a code address in the statically mapped image, so unlike a
+     * game_ram pool pointer it is stable for the whole process lifetime and safe
+     * to cache. */
     if (!g_draw_orig) {
         g_draw_orig = chain->base;
         if (!g_draw_orig) {
-            logf_("override: no original body, pass-through");
+            logq("override: no original body, pass-through");
             roth_next_draw_text_to_buffer(chain, str, dest, pitch, flags);
             return;
         }
-        logf_("override: original body @ %p", g_draw_orig);
+        logq("override: original body @ %p", g_draw_orig);
     }
 
     uint32_t pitch2 = (flags & 1u) ? pitch * 2u : pitch;
     uint32_t half   = (flags & 1u) ? pitch : 0u;
-    uint8_t  colour = ramp_colour(str);
-    ramp_build(colour);
+    uint8_t  colour = ramp_colour(api, str);
+    ramp_prefetch(colour);
 
     /* ---- scan the control-code string into per-line plain text ---- */
-    static char lines[MAX_LINES][MAX_LINE];
-    static const char *zh[MAX_LINES];
-    static int  adv[MAX_LINES];             /* per-line 0x02 pen advance (px) */
+    /* Stack, not static: the override must be re-entrant-safe and this runs in
+     * signal context (the 70 Hz tick can reach draw_text_to_buffer). ~4.7 KB on
+     * the trap alt-stack (256 KB, see the host's sigaltstack setup) is fine. */
+    char lines[MAX_LINES][MAX_LINE];
+    const char *zh[MAX_LINES];
+    int  adv[MAX_LINES];                    /* per-line 0x02 pen advance (px) */
     int nlines = 0;
     memset(adv, 0, sizeof adv);
 
-    static char plain[MAX_LINE];
+    char plain[MAX_LINE];
     int pn = 0, nl = 0;
     for (;;) {
-        uint8_t c = RB(str);
+        uint8_t c = rb(api, str);
         str++;
         if (c == 0) break;
         if (c == 0x0d || c == 0x0a) {
@@ -873,7 +964,7 @@ static void ROTH_CDECL on_draw_text_to_buffer(struct roth_chain *chain,
             if (c == 0x01) { str++; continue; }    /* <colour> */
             if (c == 0x02) {                        /* <lo> <hi> pen advance */
                 if (nl < MAX_LINES) {
-                    uint8_t lo = RB(str), hi = RB(str + 1u);
+                    uint8_t lo = rb(api, str), hi = rb(api, str + 1u);
                     adv[nl] += (int)lo | ((int)hi << 8);
                 }
                 str += 2; continue;
@@ -902,10 +993,11 @@ static void ROTH_CDECL on_draw_text_to_buffer(struct roth_chain *chain,
     uint8_t  dflags = flags & ~1u;          /* always single-plane */
 
     /* Nothing in this block is translated: hand the ORIGINAL string back to the
-     * engine verbatim. That keeps every control code (colour ramp and the 0x02
-     * pen advance) byte-for-byte identical to vanilla, so nothing drifts. */
+     * rest of the chain (not to the raw body) so every control code -- colour
+     * ramp and the 0x02 pen advance -- stays byte-for-byte vanilla, and any
+     * lower-priority mod still gets to see the string. */
     if (translated == 0) {
-        g_draw_orig(str0, dest, pitch, flags);
+        roth_next_draw_text_to_buffer(chain, str0, dest, pitch, flags);
         return;
     }
 
@@ -917,8 +1009,11 @@ static void ROTH_CDECL on_draw_text_to_buffer(struct roth_chain *chain,
             render_utf8(base, pitch2, half, 1 + adv[i], i * line_h + 1, zh[i], g_ramp[colour]);
         } else {
             /* Re-emit the indent so the fall-through line lands exactly where
-             * vanilla put it (dropping it shifted every line left by adv). */
-            static char buf[MAX_LINE + 8];
+             * vanilla put it (dropping it shifted every line left by adv). This
+             * is the one place we call the recorded original body directly: the
+             * chain cursor is already spent for this call, so roth_next() is not
+             * available, and we specifically want the unmodified engine pen. */
+            char buf[MAX_LINE + 8];
             size_t n = 0;
             buf[n++] = 0x01;
             buf[n++] = colour;
@@ -936,8 +1031,8 @@ static void ROTH_CDECL on_draw_text_to_buffer(struct roth_chain *chain,
     /* Log the miss case too, or "no Chinese" is indistinguishable from
      * "nothing to translate". Cheap: only the first 60 draws are noisy. */
     if (translated || g_draw_calls <= 60)
-        logf_("draw: %d/%d lines translated (pitch=%u flags=%u colour=%02x)",
-              translated, nlines, pitch, flags, colour);
+        logq("draw: %d/%d lines translated (pitch=%u flags=%u colour=%02x)",
+             translated, nlines, pitch, flags, colour);
 }
 
 /* ==========================================================================
@@ -965,7 +1060,7 @@ static void banner_build(void)
     static const uint8_t try_col[] = { 0x0d, 0x0e, 0x0f, 0x0a, 0x0b, 0x0c };
     const uint8_t *ramp = NULL;
     for (unsigned i = 0; i < sizeof try_col / sizeof try_col[0]; i++) {
-        ramp_build(try_col[i]);
+        ramp_prefetch(try_col[i]);
         if (g_ramp_ok[try_col[i]]) { ramp = g_ramp[try_col[i]]; break; }
     }
     if (!ramp) { logf_("selftest: no ramp harvestable, overlay disabled"); return; }
@@ -1059,7 +1154,6 @@ static void banner_build(void)
 static void ROTH_CDECL on_compose_tick(const struct roth_api_v1 *api,
                                        uint8_t *pixels, uint32_t width, uint32_t height)
 {
-    (void)api;
     if (!g_selftest || !g_ready || !pixels) return;
     if (!width || !height || width > 4096u || height > 4096u) return;
 
@@ -1091,12 +1185,16 @@ static void ROTH_CDECL on_compose_tick(const struct roth_api_v1 *api,
      * reported 0% -- it was measuring the wrong buffer, not a repaint. What it
      * actually exposed was that only the first few ticks were logged, because
      * the counter was clamped. Log the real cadence instead. */
-    if (!g_tick_t0) g_tick_t0 = (unsigned long)time(NULL);
+    /* Timing law (sdk/MODDING_GUIDE.md): pace off the engine's own 70 Hz
+     * counter at 0x90bcc -- never wall-clock or callback counts, which drift
+     * several-fold between scenes. */
+    if (!g_tick_t0) g_tick_t0 = api && api->game_ram ? api->game_ram->u16(0x90bcc) : 0u;
     g_tick_n++;
-    if (g_tick_n % 70u == 0) {
-        unsigned long el = (unsigned long)time(NULL) - g_tick_t0;
-        logf_("selftest: tick=%u elapsed=%lus rate=%.1fHz",
-              g_tick_n, el, el ? (double)g_tick_n / (double)el : 0.0);
+    if (g_tick_n % 70u == 0 && api && api->game_ram) {
+        uint16_t now = api->game_ram->u16(0x90bcc);
+        uint16_t el  = (uint16_t)(now - g_tick_t0);
+        logf_("selftest: tick=%u engine_ticks=%u rate=%.1fHz",
+              g_tick_n, el, el ? (double)g_tick_n * 70.0 / (double)el : 0.0);
     }
 }
 
@@ -1105,14 +1203,27 @@ static void ROTH_CDECL on_compose_tick(const struct roth_api_v1 *api,
  * the only signal that tells us whether the engine ever renders text at all. */
 static void ROTH_CDECL on_frame_game(const struct roth_api_v1 *api)
 {
-    (void)api;
     if (!g_ready) return;
-    if (!g_frame_t0) g_frame_t0 = (unsigned long)time(NULL);
+
+    /* Drain whatever the override queued since the last frame. The override
+     * can run in the 70 Hz tick, so it logs into RAM and we do the fopen here,
+     * in GAME context, where file I/O is legal. */
+    logq_flush();
+
+    /* A3: run the booked ramp harvests here, where engine calls are legal.
+     * Until a colour's harvest lands, ramp_prefetch() left it flat, so the
+     * first frames of a session can render text in a slightly wrong shade. */
+    for (unsigned c = 0; c < 256; c++) {
+        if (g_ramp_pend[c]) { ramp_harvest((uint8_t)c); g_ramp_pend[c] = 0; }
+    }
+
+    if (!g_frame_t0) g_frame_t0 = api && api->game_ram ? api->game_ram->u16(0x90bcc) : 0u;
     g_frame_n++;
-    if (g_frame_n % 200u == 0) {
-        unsigned long el = (unsigned long)time(NULL) - g_frame_t0;
-        logf_("frame: tick=%u elapsed=%lus rate=%.1fHz draw_calls=%u",
-              g_frame_n, el, el ? (double)g_frame_n / (double)el : 0.0, g_draw_calls);
+    if (g_frame_n % 200u == 0 && api && api->game_ram) {
+        uint16_t now = api->game_ram->u16(0x90bcc);
+        uint16_t el  = (uint16_t)(now - g_frame_t0);
+        logf_("frame: tick=%u engine_ticks=%u draw_calls=%u",
+              g_frame_n, el, g_draw_calls);
     }
 }
 
@@ -1150,7 +1261,12 @@ static void ROTH_CDECL on_load(const struct roth_api_v1 *api)
 static void ROTH_CDECL on_game_ram_ready(const struct roth_api_v1 *api)
 {
     g_ram_size = api->game_ram ? api->game_ram->size() : 0u;
-    logf_("game_ram_ready: size=%u", g_ram_size);
+    /* Resolve the base of the canonical address space. The engine hands us
+     * runtime pointers as canonical VA + base, so rb() subtracts this to get
+     * back a canonical offset. to_ptr(0) == base + 0 == base. */
+    g_base  = (uintptr_t)api->game_ram->to_ptr(0u);
+    g_gr_ok = g_base != 0u;
+    logf_("game_ram_ready: size=%u base=%p", g_ram_size, (void *)g_base);
     desc_parse(api);
     probe_build(api);
     tbl_load();
