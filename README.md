@@ -2,7 +2,7 @@
 
 把 1996 年的 DOS 游戏 **Realms of the Haunting** 中文化。
 
-以 [ROTH.C](https://github.com/slidick/ROTH.C)（引擎 C 语言重制 + mod 平台）为载体，通过一个 32 位
+以 [ROTH.C](https://github.com/beyond-the-ire/ROTH.C)（引擎 C 语言重制 + mod 平台）为载体，通过一个 32 位
 `plugin.dll`（replacement mod）接管引擎的 `draw_text_to_buffer`，用
 [stb_truetype](https://github.com/nothings/stb) 把中文点阵字形直接渲染进游戏原生的 **8-bit 调色板帧缓冲**。
 
@@ -139,7 +139,7 @@ make install GAME=1
 
 ## 致谢
 
-- [slidick/ROTH.C](https://github.com/slidick/ROTH.C) —— 引擎重制与 mod 平台
+- [beyond-the-ire/ROTH.C](https://github.com/beyond-the-ire/ROTH.C) —— 引擎重制与 mod 平台
 - [nothings/stb](https://github.com/nothings/stb) —— stb_truetype
 - 文泉驿项目 —— 点阵宋体
 - 原版 *Realms of the Haunting* © 1996 Gremlin Interactive / Interplay
