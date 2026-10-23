@@ -1,5 +1,4 @@
 # build output
-plugin.dll
 *.o
 
 # runtime logs
@@ -8,3 +7,7 @@ chinese.log
 # editor / OS noise
 Thumbs.db
 desktop.ini
+
+# NOTE: plugin.dll is intentionally NOT ignored -- this repo ships a prebuilt
+# DLL so an experimental build can be dropped into mods/chinese/ without a
+# toolchain. Rebuild it with `make` if you change plugin.c.
