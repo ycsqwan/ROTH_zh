@@ -218,9 +218,25 @@ typedef struct {
     uint8_t *bits;
 } GCache;
 
-#define GC_SIZE     4096u
-#define GC_SLOTS    64u
-static GCache g_gc[GC_SLOTS];
+/* The cache is built ONCE, in on_game_ram_ready (MAIN context, where
+ * allocation and stb_truetype calls are legal), from the exact set of
+ * codepoints that appear in the translation table.
+ *
+ * draw_text_to_buffer carries context_flags = tick_isr_reachable
+ * (sdk/abi/override_targets.json), so the override runs in TICK_ISR, where
+ * MODDING_GUIDE.md says "no engine calls, be fast". An exact set plus a
+ * sorted-array lookup gives the allocation-free guarantee that context needs:
+ * every codepoint render_utf8() can ever be handed is already rasterised, so
+ * get_glyph() below is a pure read.
+ *
+ * The old fixed 64-slot hash took `cp * 2654435761u % 64`, i.e. the low 6 bits
+ * of the codepoint. CJK codepoints cluster on their low byte, so slots
+ * collided constantly and every miss re-allocated and re-rasterised inside
+ * the override -- the exact thing TICK_ISR forbids. */
+static GCache   *g_glyphs;      /* rasterised slots, parallel to g_cps        */
+static uint32_t *g_cps;        /* sorted unique codepoints from the table    */
+static uint32_t  g_gc_n;       /* number of populated slots                  */
+static GCache    g_gc_miss;    /* handed back for a codepoint outside the set */
 
 static void *xmalloc(size_t n)
 {
@@ -335,33 +351,109 @@ static uint32_t utf8_decode(const unsigned char *s, int *out_len)
     return cp;
 }
 
-static GCache *get_glyph(uint32_t cp)
+/* Fill one slot. Only ever called from glyph_prewarm(), i.e. from
+ * on_game_ram_ready -- never from the override. */
+static void glyph_rasterise(GCache *g, uint32_t cp)
 {
-    uint32_t idx = (cp * 2654435761u) % GC_SLOTS;
-    GCache *g = &g_gc[idx];
-    if (g->ok && g->cp == cp) return g;
-    if (g->bits) { free(g->bits); g->bits = NULL; }
-
     int adv = 0, lsb = 0, x0 = 0, y0 = 0, x1 = 0, y1 = 0;
+    memset(g, 0, sizeof *g);
+    g->cp = cp;
     stbtt_GetCodepointHMetrics(&g_font, (int)cp, &adv, &lsb);
     stbtt_GetCodepointBitmapBox(&g_font, (int)cp, g_scale, g_scale, &x0, &y0, &x1, &y1);
 
-    g->cp    = cp;
     g->w     = x1 - x0;
     g->h     = y1 - y0;
     g->xoff  = x0;
     g->yoff  = g_baseline + y0;      /* from line top, not from baseline */
     g->advance = adv ? (int)((float)adv * g_scale * 64.0f) : (int)(FONT_EM * 64.0f);
     if (g->w <= 0 || g->h <= 0 || g->w > 64 || g->h > 64) {
-        g->w = g->h = 0; g->ok = 1; return g;
+        g->w = g->h = 0; g->ok = 1; return;
     }
 
     g->bits = (uint8_t *)xmalloc((size_t)g->w * (size_t)g->h);
-    if (!g->bits) { g->ok = 0; return g; }
+    if (!g->bits) { g->ok = 0; return; }
     stbtt_MakeCodepointBitmap(&g_font, g->bits, g->w, g->h, g->w,
                               g_scale, g_scale, (int)cp);
     g->ok = 1;
-    return g;
+}
+
+/* Pure read: no allocation, no rasterisation. Safe in TICK_ISR. */
+static GCache *get_glyph(uint32_t cp)
+{
+    if (!g_cps || !g_gc_n) return &g_gc_miss;
+    uint32_t lo = 0, hi = g_gc_n;
+    while (lo < hi) {
+        uint32_t mid = lo + ((hi - lo) >> 1);
+        if (g_cps[mid] < cp)      lo = mid + 1;
+        else if (g_cps[mid] > cp) hi = mid;
+        else                      return &g_glyphs[mid];
+    }
+    return &g_gc_miss;
+}
+
+/* Declared here so glyph_prewarm() can read the blob it is about to
+ * rasterise; defined with the rest of the translation table further down. */
+static uint8_t *g_tbl_strs;
+static uint32_t g_tbl_size;
+
+static int cmp_u32(const void *a, const void *b)
+{
+    uint32_t x = *(const uint32_t *)a, y = *(const uint32_t *)b;
+    return (int)(x > y) - (int)(x < y);
+}
+
+/* Rasterise every codepoint that can reach render_utf8(). The override only
+ * ever renders translation-table values, so the table IS the complete working
+ * set -- pre-building it here is what makes the override allocation-free.
+ * Runs in on_game_ram_ready (MAIN context). */
+static int glyph_prewarm(void)
+{
+    if (!g_font_ok || !g_tbl_strs || g_tbl_size == 0) {
+        logf_("glyph: prewarm skipped (font_ok=%d table=%u bytes)",
+              g_font_ok, g_tbl_size);
+        return 0;
+    }
+
+    /* Count lead bytes first so the scratch array is exactly sized. */
+    size_t cap = 0;
+    for (uint32_t i = 0; i < g_tbl_size; i++)
+        if ((g_tbl_strs[i] & 0xc0u) != 0x80u) cap++;
+    if (!cap) return 0;
+
+    uint32_t *tmp = (uint32_t *)xmalloc(cap * sizeof *tmp);
+    if (!tmp) return 0;
+
+    size_t n = 0;
+    for (uint32_t i = 0; i < g_tbl_size; i++) {
+        if ((g_tbl_strs[i] & 0xc0u) == 0x80u) continue;   /* continuation byte */
+        int len = 0;
+        uint32_t cp = utf8_decode(g_tbl_strs + i, &len);
+        if (len < 1) len = 1;
+        if (cp) tmp[n++] = cp;                            /* skip the NUL separator */
+        i += (uint32_t)(len - 1);
+    }
+    if (!n) { free(tmp); return 0; }
+
+    qsort(tmp, n, sizeof *tmp, cmp_u32);
+    size_t uniq = 0;
+    for (size_t i = 0; i < n; i++)
+        if (i == 0 || tmp[i] != tmp[i - 1]) tmp[uniq++] = tmp[i];
+
+    g_cps    = (uint32_t *)xmalloc((size_t)uniq * sizeof *g_cps);
+    g_glyphs = (GCache *)xmalloc((size_t)uniq * sizeof *g_glyphs);
+    if (!g_cps || !g_glyphs) { free(tmp); free(g_cps); g_cps = NULL; return 0; }
+    memcpy(g_cps, tmp, (size_t)uniq * sizeof *g_cps);
+    free(tmp);
+
+    g_gc_n = (uint32_t)uniq;
+    int failed = 0;
+    for (uint32_t i = 0; i < g_gc_n; i++) {
+        glyph_rasterise(&g_glyphs[i], g_cps[i]);
+        if (!g_glyphs[i].ok) failed++;
+    }
+    logf_("glyph: prewarmed %u unique codepoints (%d raster failures)",
+          g_gc_n, failed);
+    return 1;
 }
 
 /* ==========================================================================
@@ -1010,9 +1102,12 @@ static void ROTH_CDECL on_draw_text_to_buffer(struct roth_chain *chain,
         } else {
             /* Re-emit the indent so the fall-through line lands exactly where
              * vanilla put it (dropping it shifted every line left by adv). This
-             * is the one place we call the recorded original body directly: the
-             * chain cursor is already spent for this call, so roth_next() is not
-             * available, and we specifically want the unmodified engine pen. */
+             * is the one place we call the recorded original body directly. We
+             * deliberately do NOT use roth_next() here: this branch can run
+             * several times for a single draw call, and every roth_next() spends
+             * the chain cursor again, so only the first untranslated line would
+             * reach the next link. We want the unmodified engine pen, not the
+             * chain. */
             char buf[MAX_LINE + 8];
             size_t n = 0;
             buf[n++] = 0x01;
@@ -1157,8 +1252,9 @@ static void ROTH_CDECL on_compose_tick(const struct roth_api_v1 *api,
     if (!g_selftest || !g_ready || !pixels) return;
     if (!width || !height || width > 4096u || height > 4096u) return;
 
-    /* The banner is already at its final size, so this is a plain copy. */
-    if (!g_banner_ok) banner_build();
+    /* The banner is already at its final size, so this is a plain copy. It is
+     * built in on_frame_game (GAME context); a compose tick is TICK_ISR, where
+     * allocation and font calls are off-limits. */
     if (!g_banner_ok || !g_banner_px) return;
 
     int sw = g_banner_w, sh = g_banner_h;
@@ -1217,6 +1313,10 @@ static void ROTH_CDECL on_frame_game(const struct roth_api_v1 *api)
         if (g_ramp_pend[c]) { ramp_harvest((uint8_t)c); g_ramp_pend[c] = 0; }
     }
 
+    /* A4: build the self-test banner here rather than in on_compose_tick --
+     * that callback is TICK_ISR, where allocation and font calls are illegal. */
+    if (g_selftest && !g_banner_ok) banner_build();
+
     if (!g_frame_t0) g_frame_t0 = api && api->game_ram ? api->game_ram->u16(0x90bcc) : 0u;
     g_frame_n++;
     if (g_frame_n % 200u == 0 && api && api->game_ram) {
@@ -1270,6 +1370,10 @@ static void ROTH_CDECL on_game_ram_ready(const struct roth_api_v1 *api)
     desc_parse(api);
     probe_build(api);
     tbl_load();
+    /* A4: rasterise the whole table here, in MAIN context. From this point on
+     * the override never allocates and never rasterises, which is what the
+     * TICK_ISR context it runs in requires. */
+    glyph_prewarm();
     g_ready = 1;
 }
 
