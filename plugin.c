@@ -3,20 +3,31 @@
  * ---------------------------------------------------------------------------
  * Target engine : rothc.exe (ROTH.C reconstruction engine, 32-bit i686)
  * Override     : draw_text_to_buffer  (canonical VA 0x14d04, eligible, no SMC)
- * Strategy     : replace (priority -50 so we load before any other mod). Lines
- *                with no translation fall through to the recorded original body;
+ * Strategy     : conditional replace, registered OUTERMOST (priority 100).
+ *                Higher priority = outer = dispatched first (see
+ *                override_registry.c: slots are sorted descending, so a higher
+ *                number runs before a lower one and a "replace" blocks only the
+ *                links *inside* it). A line with no translation is handed to the
+ *                rest of the chain with roth_next_draw_text_to_buffer(), so any
+ *                lower-priority mod still sees every string we do not own;
  *                translated lines are rasterised from a TrueType CJK face via
- *                stb_truetype.
+ *                stb_truetype and we skip the engine's single-byte glyph loop.
  *
  * Why "replace" and not "wrap": draw_text_to_buffer is the innermost control-code
  * string renderer (menus, timed messages, dialogue panels, option menus, item
  * labels). Wrapping it would leave the original single-byte glyph loop in charge
  * of layout; replacing it lets us own line layout, line height and the ramp.
  *
- * Palette: the engine framebuffer is 8-bit indexed; RB()/WB() are identity
- * flat-address accesses, so drawing is "write palette indices". The original
- * marks empty neighbours with literal index 1 (the outline) and blits ramp
- * colours on top. We keep that convention.
+ * Palette: the engine framebuffer is 8-bit indexed, so drawing is "write
+ * palette indices". The original marks empty neighbours with literal index 1
+ * (the outline) and blits ramp colours on top. We keep that convention.
+ *
+ * Game-RAM access: the engine hands us raw host pointers (canonical VA + base),
+ * so a plugin-side string read goes through the SDK's bounds-checked accessor
+ * rb(): it maps host pointer -> canonical offset (ptr - to_ptr(0)) and reads via
+ * api->game_ram->u8(). A flat dereference of an out-of-range address does not
+ * just return garbage -- plugin_loader.c documents that a plugin read outside
+ * the mapped window faults process-wide.
  *
  * Build (see Makefile):
  *   i686-w64-mingw32-gcc -shared -std=c11 -O2 -Wall -Wextra \
@@ -38,7 +49,8 @@
 /* ==========================================================================
  * Tunables
  * ========================================================================== */
-#define ROTH_PLUGIN_ID  "roth.chinese"
+#define ROTH_PLUGIN_ID  "io.github.ycsqwan.roth-chinese"
+#define ROTH_PRIORITY   100   /* outermost: see the Strategy note above */
 
 #define FONT_FILE       "WenQuanYi Bitmap Song 14px.ttf"
 #define TABLE_FILE      "translations_zh.bin"
@@ -1149,8 +1161,8 @@ static void ROTH_CDECL on_register_overrides(const struct roth_api_v1 *api,
                                              struct roth_registrar_v1 *reg)
 {
     if (!api->engine) { logf_("register: no engine view"); return; }
-    roth_override(reg, ROTH_FN_draw_text_to_buffer, on_draw_text_to_buffer, -50);
-    logf_("register: draw_text_to_buffer override (prio -50)");
+    roth_override(reg, ROTH_FN_draw_text_to_buffer, on_draw_text_to_buffer, ROTH_PRIORITY);
+    logf_("register: draw_text_to_buffer override (prio %d)", ROTH_PRIORITY);
 }
 
 static void ROTH_CDECL on_unload(const struct roth_api_v1 *api) { (void)api; logf_("unload"); }
