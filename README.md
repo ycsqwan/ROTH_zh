@@ -114,6 +114,19 @@ make install GAME=1
 
 `plugin.c`、`Makefile` 以 **MIT** 发布，见 [LICENSE](LICENSE)。
 
+### 译文
+
+中文译文（`translations_zh.json` 及其编译产物 `translations_zh.bin`）是本 mod 作者的
+**原创翻译作品**，以 **CC BY-NC-SA 4.0**（署名-非商业性使用-相同方式共享 4.0
+国际）发布：
+
+- **版权**：Copyright (c) 2026 ycsqwan
+- **许可全文**：[translations_zh-LICENSE.txt](translations_zh-LICENSE.txt)
+- **官方页面**：<https://creativecommons.org/licenses/by-nc-sa/4.0/>
+
+英文原文为原版游戏台词，版权归 Gremlin Interactive / Interplay 所有；本许可仅覆盖
+译者的翻译贡献。
+
 ### 字体
 
 随附的运行时字体 `fonts/WenQuanYi Bitmap Song 14px.ttf`（文泉驿点阵宋体）

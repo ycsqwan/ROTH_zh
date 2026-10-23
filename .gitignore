@@ -1,5 +1,6 @@
 # build output
 *.o
+dist/
 
 # runtime logs
 chinese.log
@@ -7,6 +8,28 @@ chinese.log
 # editor / OS noise
 Thumbs.db
 desktop.ini
+
+# ---------------------------------------------------------------------------
+# Experimental fonts (NOT shipped)
+#
+# Only fonts/WenQuanYi Bitmap Song 14px.ttf is loaded at runtime (see FONT_SRC
+# in the Makefile). The other faces kept on disk for experiments are large
+# (Noto Sans SC ~17 MB, WQY other pixel sizes ~30 MB total) and would add ~77 MB
+# to the repository for no runtime benefit, so the whole fonts/ directory is
+# ignored and only the two shipped files are re-included.
+# ---------------------------------------------------------------------------
+fonts/*
+!fonts/WenQuanYi Bitmap Song 14px.ttf
+!fonts/WenQuanYi-LICENSE.txt
+
+# Superseded license file: the shipped font is GPL-2.0 + font embedding
+# exception (see fonts/WenQuanYi-LICENSE.txt), not OFL. The OFL text belonged to
+# fonts tried during development (Cubic 11 / M+ FONTS) and is no longer
+# applicable.
+OFL.txt
+fonts/OFL.txt
+Cubic_11.ttf
+fonts/Cubic_11.ttf
 
 # NOTE: plugin.dll is intentionally NOT ignored -- this repo ships a prebuilt
 # DLL so an experimental build can be dropped into mods/chinese/ without a

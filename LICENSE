@@ -23,7 +23,8 @@ SOFTWARE.
 ---
 
 Scope: the MIT license above applies to this mod's source code only
-(plugin.c, Makefile). It does NOT apply to the bundled font.
+(plugin.c, Makefile). It does NOT apply to the bundled font or the translation
+table.
 
 This project bundles or depends on third-party components:
 
@@ -36,5 +37,11 @@ This project bundles or depends on third-party components:
   from disk at runtime as a separate file; it is not embedded in plugin.dll.
 - Experimental fonts tried during development (Cubic 11, Noto Sans SC)
   are NOT distributed with this repository.
+- Chinese translations (translations_zh.json and its compiled form
+  translations_zh.bin) are ORIGINAL works by the mod author, licensed
+  separately under Creative Commons Attribution-NonCommercial-ShareAlike
+  4.0 International (CC BY-NC-SA 4.0). Full text: translations_zh-LICENSE.txt.
+  The English source strings remain the property of the original game's
+  rights holders.
 
 No original Realms of the Haunting game assets are included in this repository.
