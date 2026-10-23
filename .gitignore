@@ -1,0 +1,10 @@
+# build output
+plugin.dll
+*.o
+
+# runtime logs
+chinese.log
+
+# editor / OS noise
+Thumbs.db
+desktop.ini
