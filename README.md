@@ -110,14 +110,30 @@ make install GAME=1
 
 ## 字体与许可
 
-- 本 mod 的源码（`plugin.c`、`Makefile`）以 **MIT** 发布，见 [LICENSE](LICENSE)。
-- 运行时字体 **文泉驿点阵宋体（WenQuanYi Bitmap Song）** 使用
-  **GPL-2.0-with-font-exception** 许可，版权归文泉驿项目所有
-  （见 <https://www.wenquanyi.org/>）。本仓库只随附运行时需要的
-  `fonts/WenQuanYi Bitmap Song 14px.ttf`。
-- 开发期试过的其他字体（Cubic 11、Noto Sans SC、其他像素尺寸）未包含在本仓库内；
-  其许可参考见 `fonts/OFL.txt`。
-- **不包含任何原版游戏素材。**
+### 代码
+
+`plugin.c`、`Makefile` 以 **MIT** 发布，见 [LICENSE](LICENSE)。
+
+### 字体
+
+随附的运行时字体 `fonts/WenQuanYi Bitmap Song 14px.ttf`（文泉驿点阵宋体）
+使用 **GNU GPL v2 + 字体嵌入例外条款**（GPL-2.0 with font embedding exception）：
+
+- **版权**：Copyright (c) 2004-2010, The WenQuanYi Project Board of Trustees and
+  Qianqian Fang；字体基于 firefly 的点阵字体作品
+- **完整许可文本与出处**：[fonts/WenQuanYi-LICENSE.txt](fonts/WenQuanYi-LICENSE.txt)
+- **上游**：<https://wenq.org/wqy2/index.cgi?BitmapSong>
+- 该 TTF 由 AmusementClub 从 v1.0.0-RC1 (Hero) 的 PCF 点阵字体转换而来
+
+本 mod **不内嵌**该字体：字体是运行时从磁盘加载的独立文件（见 `plugin.c` 中的
+`FONT_FILE`），而 `plugin.dll` 只有约 155 KB，不含字体数据。因此 DLL 与字体是
+两个相互独立的作品，代码的 MIT 许可不受字体许可影响（GPL-2.0 第 2 条末段）。
+
+### 其他
+
+- 开发期试用的其他字体（Cubic 11、Noto Sans SC、WQY 其他像素尺寸）
+  **未随仓库分发**，相应的 `fonts/OFL.txt` 也不再适用。
+- 本仓库**不包含任何原版游戏素材**。
 
 ---
 

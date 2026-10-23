@@ -22,13 +22,19 @@ SOFTWARE.
 
 ---
 
+Scope: the MIT license above applies to this mod's source code only
+(plugin.c, Makefile). It does NOT apply to the bundled font.
+
 This project bundles or depends on third-party components:
 
 - stb_truetype.h (stb_truetype) — public domain / MIT, by Sean Barrett.
-- WenQuanYi Bitmap Song (fonts/WenQuanYi Bitmap Song 14px.ttf) —
-  GPL-2.0-with-font-exception, Copyright (c) WenQuanYi Project.
-  This font is NOT covered by the MIT license above.
-- Fonts under fonts/ kept for experiments (Cubic 11, Noto Sans SC) are
-  covered by their own licenses, see fonts/OFL.txt.
+- WenQuanYi Bitmap Song (fonts/WenQuanYi Bitmap Song 14px.ttf) — GPL-2.0
+  with font embedding exception, Copyright (c) 2004-2010 The WenQuanYi
+  Project Board of Trustees and Qianqian Fang, based on firefly's work.
+  Full license text and provenance: fonts/WenQuanYi-LICENSE.txt.
+  This font is NOT covered by the MIT license above. The font is loaded
+  from disk at runtime as a separate file; it is not embedded in plugin.dll.
+- Experimental fonts tried during development (Cubic 11, Noto Sans SC)
+  are NOT distributed with this repository.
 
 No original Realms of the Haunting game assets are included in this repository.
