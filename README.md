@@ -37,7 +37,7 @@
 <p align="center">
   <img src="docs/images/01-subtitle-examine.png" width="600"
        alt="物品检视字幕：这个从架子上掉下来了。尽管很脏，可能还有用。" /><br />
-  <sub>物品检视字幕 —— “这个从架子上掉下来了。尽管很脏，可能还有用。”</sub>
+  <sub>场景字幕 —— “这个从架子上掉下来了。尽管很脏，可能还有用。”</sub>
 </p>
 
 <p align="center">
