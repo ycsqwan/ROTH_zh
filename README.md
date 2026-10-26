@@ -24,7 +24,50 @@
 | 字体 | 文泉驿点阵宋体 14px（WenQuanYi Bitmap Song） |
 | 渲染方式 | stb_truetype → 8-bit 调色板索引 |
 | 覆盖的 UI | 菜单、选项、道具名、对话框（已实测） |
-| 未验证 | 过场字幕、NPC 对话（**尚无成功截图**） |
+| 未验证 | NPC 对话完整流程 |
+
+---
+
+## 画面示例
+
+中文字形直接栅格化进 8-bit 调色板帧缓冲，字形边缘无灰阶断裂（原生 em 二值渲染）。
+
+**字幕**（`draw_text_to_buffer` → 定时消息路径）
+
+<p align="center">
+  <img src="docs/images/01-subtitle-examine.png" width="600"
+       alt="物品检视字幕：这个从架子上掉下来了。尽管很脏，可能还有用。" /><br />
+  <sub>物品检视字幕 —— “这个从架子上掉下来了。尽管很脏，可能还有用。”</sub>
+</p>
+
+<p align="center">
+  <img src="docs/images/02-subtitle-stone-room.png" width="600"
+       alt="场景字幕：里面有某种液体。有什么想法吗？" /><br />
+  <sub>场景字幕 —— “里面有某种液体。有什么想法吗？”</sub>
+</p>
+
+<p align="center">
+  <img src="docs/images/03-subtitle-portrait.png" width="600"
+       alt="场景字幕：那双眼睛……几乎看起来像真的。" /><br />
+  <sub>场景字幕 —— “那双眼睛……几乎看起来像真的。”</sub>
+</p>
+
+**UI 文本**（物品栏与物品检视窗口）
+
+<p align="center">
+  <img src="docs/images/04-inventory-items.png" width="600"
+       alt="物品栏：道具名已中文化" /><br />
+  <sub>物品栏 —— 道具名、角色名均已中文化</sub>
+</p>
+
+<p align="center">
+  <img src="docs/images/05-item-inspect.png" width="600"
+       alt="物品检视窗口：标题“书房钥匙”" /><br />
+  <sub>物品检视窗口 —— 标题“书房钥匙”</sub>
+</p>
+
+> 截图取自窗口化运行的 `rothc.exe`（native host，1200×675）。
+> 字幕、物品名、菜单、选项、对话框均为实测渲染结果。
 
 ---
 
